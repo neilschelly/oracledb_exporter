@@ -48,6 +48,7 @@ type Metric struct {
 	Labels           []string
 	MetricsDesc      map[string]string
 	MetricsType      map[string]string
+	MetricsBuckets   map[string]map[string]string
 	FieldToAppend    string
 	Request          string
 	IgnoreZeroResult bool
@@ -216,6 +217,7 @@ func (e *Exporter) scrape(ch chan<- prometheus.Metric) {
 		log.Debugln("- Metric MetricsDesc: ", metric.MetricsDesc)
 		log.Debugln("- Metric Context: ", metric.Context)
 		log.Debugln("- Metric MetricsType: ", metric.MetricsType)
+		log.Debugln("- Metric MetricsBuckets: ", metric.MetricsBuckets, "(Ignored unless Histogram type)")
 		log.Debugln("- Metric Labels: ", metric.Labels)
 		log.Debugln("- Metric FieldToAppend: ", metric.FieldToAppend)
 		log.Debugln("- Metric IgnoreZeroResult: ", metric.IgnoreZeroResult)
@@ -229,6 +231,16 @@ func (e *Exporter) scrape(ch chan<- prometheus.Metric) {
 		if len(metric.MetricsDesc) == 0 {
 			log.Errorln("Error scraping for query", metric.Request, ". Did you forget to define metricsdesc  in your toml file?")
 			continue
+		}
+
+		for column, metricType := range metric.MetricsType {
+			if metricType == "histogram" {
+				_, ok := metric.MetricsBuckets[column]
+				if ! ok {
+					log.Errorln("Unable to find MetricsBuckets configuration key for metric. (metric=" + column + ")")
+					continue
+				}
+			}
 		}
 
 		if err = ScrapeMetric(e.db, ch, metric); err != nil {
@@ -245,6 +257,7 @@ func GetMetricType(metricType string, metricsType map[string]string) prometheus.
 	var strToPromType = map[string]prometheus.ValueType{
 		"gauge":   prometheus.GaugeValue,
 		"counter": prometheus.CounterValue,
+		"histogram": prometheus.UntypedValue,
 	}
 
 	strType, ok := metricsType[strings.ToLower(metricType)]
@@ -262,14 +275,14 @@ func GetMetricType(metricType string, metricsType map[string]string) prometheus.
 func ScrapeMetric(db *sql.DB, ch chan<- prometheus.Metric, metricDefinition Metric) error {
 	log.Debugln("Calling function ScrapeGenericValues()")
 	return ScrapeGenericValues(db, ch, metricDefinition.Context, metricDefinition.Labels,
-		metricDefinition.MetricsDesc, metricDefinition.MetricsType,
+		metricDefinition.MetricsDesc, metricDefinition.MetricsType, metricDefinition.MetricsBuckets,
 		metricDefinition.FieldToAppend, metricDefinition.IgnoreZeroResult,
 		metricDefinition.Request)
 }
 
 // generic method for retrieving metrics.
 func ScrapeGenericValues(db *sql.DB, ch chan<- prometheus.Metric, context string, labels []string,
-	metricsDesc map[string]string, metricsType map[string]string, fieldToAppend string, ignoreZeroResult bool, request string) error {
+	metricsDesc map[string]string, metricsType map[string]string, metricsBuckets map[string]map[string]string, fieldToAppend string, ignoreZeroResult bool, request string) error {
 	metricsCount := 0
 	genericParser := func(row map[string]string) error {
 		// Construct labels value
@@ -294,7 +307,33 @@ func ScrapeGenericValues(db *sql.DB, ch chan<- prometheus.Metric, context string
 					metricHelp,
 					labels, nil,
 				)
-				ch <- prometheus.MustNewConstMetric(desc, GetMetricType(metric, metricsType), value, labelsValues...)
+				if metricsType[strings.ToLower(metric)] == "histogram" {
+					count, err := strconv.ParseUint(strings.TrimSpace(row["count"]), 10, 64)
+					if err != nil {
+						log.Errorln("Unable to convert count value to int (metric=" + metric +
+							",metricHelp=" + metricHelp + ",value=<" + row["count"] + ">)")
+						continue
+					}
+					buckets := make(map[float64]uint64)
+					for field, le := range metricsBuckets[metric] {
+						lelimit, err := strconv.ParseFloat(strings.TrimSpace(le), 64)
+						if err != nil {
+							log.Errorln("Unable to convert bucket limit value to float (metric=" + metric +
+								",metricHelp=" + metricHelp + ",bucketlimit=<" + le + ">)")
+							continue
+						}
+						counter, err := strconv.ParseUint(strings.TrimSpace(row[field]), 10, 64)
+						if err != nil {
+							log.Errorln("Unable to convert ", field, " value to int (metric=" + metric +
+								",metricHelp=" + metricHelp + ",value=<" + row[field] + ">)")
+							continue
+						}
+						buckets[lelimit] = counter
+					}
+					ch <- prometheus.MustNewConstHistogram(desc, count, value, buckets, labelsValues...)
+				} else {
+					ch <- prometheus.MustNewConstMetric(desc, GetMetricType(metric, metricsType), value, labelsValues...)
+				}
 				// If no labels, use metric name
 			} else {
 				desc := prometheus.NewDesc(
@@ -302,7 +341,33 @@ func ScrapeGenericValues(db *sql.DB, ch chan<- prometheus.Metric, context string
 					metricHelp,
 					nil, nil,
 				)
-				ch <- prometheus.MustNewConstMetric(desc, GetMetricType(metric, metricsType), value)
+				if metricsType[strings.ToLower(metric)] == "histogram" {
+					count, err := strconv.ParseUint(strings.TrimSpace(row["count"]), 10, 64)
+					if err != nil {
+						log.Errorln("Unable to convert count value to int (metric=" + metric +
+							",metricHelp=" + metricHelp + ",value=<" + row["count"] + ">)")
+						continue
+					}
+					buckets := make(map[float64]uint64)
+					for field, le := range metricsBuckets[metric] {
+						lelimit, err := strconv.ParseFloat(strings.TrimSpace(le), 64)
+						if err != nil {
+							log.Errorln("Unable to convert bucket limit value to float (metric=" + metric +
+								",metricHelp=" + metricHelp + ",bucketlimit=<" + le + ">)")
+							continue
+						}
+						counter, err := strconv.ParseUint(strings.TrimSpace(row[field]), 10, 64)
+						if err != nil {
+							log.Errorln("Unable to convert ", field, " value to int (metric=" + metric +
+								",metricHelp=" + metricHelp + ",value=<" + row[field] + ">)")
+							continue
+						}
+						buckets[lelimit] = counter
+					}
+					ch <- prometheus.MustNewConstHistogram(desc, count, value, buckets)
+				} else {
+					ch <- prometheus.MustNewConstMetric(desc, GetMetricType(metric, metricsType), value)
+				}
 			}
 			metricsCount++
 		}
