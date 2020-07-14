@@ -18,6 +18,7 @@ import (
 	"fmt"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/log"
 	//Required for debugging
 	//_ "net/http/pprof"
@@ -477,7 +478,7 @@ func main() {
 	}
 	exporter := NewExporter(dsn)
 	prometheus.MustRegister(exporter)
-	http.Handle(*metricPath, prometheus.Handler())
+	http.Handle(*metricPath, promhttp.Handler())
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write(landingPage)
 	})
